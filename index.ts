@@ -9,7 +9,6 @@ const DEFAULT_MODELS_URL = `${PROVIDER_API_BASE}/models`;
 const DEFAULT_CACHE_PATH = "commandcode-models.json";
 const DEFAULT_CONTEXT_WINDOW = 128_000;
 const DEFAULT_MAX_TOKENS = 65_536;
-const STARTUP_TIMEOUT_MS = 3_000;
 const REFRESH_TIMEOUT_MS = 15_000;
 
 type ModelRecord = Record<string, unknown>;
@@ -255,27 +254,16 @@ async function fetchModels(apiKey: string, signal: AbortSignal, timeoutMs: numbe
   return models;
 }
 
-async function loadInitialModels(apiKey: string): Promise<ProviderModelConfig[]> {
-  const cached = readCachedModels();
-  if (!apiKey) return [];
-  try {
-    const live = await fetchModels(apiKey, AbortSignal.timeout(STARTUP_TIMEOUT_MS), STARTUP_TIMEOUT_MS);
-    writeCachedModels(live);
-    return live;
-  } catch {
-    return cached;
-  }
-}
-
 function zdrHeaders(): Record<string, string> | undefined {
   return process.env.CMD_ZDR === "1" || process.env.COMMANDCODE_ZDR === "1"
     ? { "x-cmd-zdr": "1" }
     : undefined;
 }
 
-export default async function piCommandCode(pi: ExtensionAPI): Promise<void> {
-  const apiKey = readApiKeyFromDisk();
-  const initialModels = await loadInitialModels(apiKey);
+export default function piCommandCode(pi: ExtensionAPI): void {
+  // Register synchronously from the last successful cache so Pi can restore
+  // commandcode/<model> before any network refresh runs.
+  const initialModels = readApiKeyFromDisk() ? readCachedModels() : [];
 
   const provider: ProviderConfig = {
     name: DISPLAY_NAME,
@@ -299,4 +287,19 @@ export default async function piCommandCode(pi: ExtensionAPI): Promise<void> {
   };
 
   pi.registerProvider(PROVIDER_ID, provider);
+
+  // Pi's native login flow also calls refreshModels after saving a key. This
+  // session hook refreshes the live catalog after the cached models are ready.
+  pi.on("session_start", async (_event, ctx) => {
+    if (!readApiKeyFromDisk()) return;
+    try {
+      await ctx.modelRegistry.refresh({
+        providers: [PROVIDER_ID],
+        force: true,
+        signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
+      });
+    } catch {
+      // Cached models remain available when the live catalog is unreachable.
+    }
+  });
 }
