@@ -1,3 +1,12 @@
+import {
+  createAssistantMessageEventStream,
+  type AssistantMessage,
+  type AssistantMessageEventStream,
+  type Context,
+  type Model,
+  type SimpleStreamOptions,
+} from "@earendil-works/pi-ai";
+import { convertMessages } from "@earendil-works/pi-ai/api/openai-completions";
 import type { ExtensionAPI, ProviderModelConfig, ProviderConfig } from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -260,6 +269,187 @@ function zdrHeaders(): Record<string, string> | undefined {
     : undefined;
 }
 
+function commandCodeCompat(model: Model<"openai-completions">): Record<string, unknown> {
+  return {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    supportsReasoningEffort: true,
+    supportsUsageInStreaming: false,
+    supportsFinishReason: true,
+    maxTokensField: "max_tokens",
+    ...(model.compat ?? {}),
+  };
+}
+
+function reasoningTextFromMessage(message: Record<string, unknown>): string {
+  if (typeof message.reasoning === "string" && message.reasoning.trim()) {
+    return message.reasoning;
+  }
+  if (!Array.isArray(message.reasoning_details)) return "";
+  return message.reasoning_details
+    .filter(isRecord)
+    .map((detail) => {
+      if (typeof detail.text === "string") return detail.text;
+      if (typeof detail.summary === "string") return detail.summary;
+      return "";
+    })
+    .filter(Boolean)
+    .join("\\n\\n");
+}
+
+function commandCodeUsage(raw: unknown): AssistantMessage["usage"] {
+  const usage = isRecord(raw) ? raw : {};
+  const promptDetails = isRecord(usage.prompt_tokens_details) ? usage.prompt_tokens_details : {};
+  const completionDetails = isRecord(usage.completion_tokens_details) ? usage.completion_tokens_details : {};
+  const input = typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : 0;
+  const output = typeof usage.completion_tokens === "number" ? usage.completion_tokens : 0;
+  const cacheRead = typeof promptDetails.cached_tokens === "number" ? promptDetails.cached_tokens : 0;
+  const reasoning = typeof completionDetails.reasoning_tokens === "number" ? completionDetails.reasoning_tokens : 0;
+  return {
+    input: Math.max(0, input - cacheRead),
+    output,
+    cacheRead,
+    cacheWrite: 0,
+    reasoning,
+    totalTokens: typeof usage.total_tokens === "number" ? usage.total_tokens : input + output,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
+}
+
+function streamCommandCodeBuffered(
+  model: Model<any>,
+  context: Context,
+  options?: SimpleStreamOptions,
+): AssistantMessageEventStream {
+  const stream = createAssistantMessageEventStream();
+  const run = async () => {
+    const output: AssistantMessage = {
+      role: "assistant",
+      content: [],
+      api: model.api,
+      provider: model.provider,
+      model: model.id,
+      usage: commandCodeUsage(undefined),
+      stopReason: "pending",
+      timestamp: Date.now(),
+    };
+
+    try {
+      if (!options?.apiKey) throw new Error(`No API key for provider: ${model.provider}`);
+      const compat = commandCodeCompat(model as Model<"openai-completions">);
+      const messages = convertMessages(model as Model<"openai-completions">, context, compat as any);
+      const body: Record<string, unknown> = {
+        model: model.id,
+        messages,
+        stream: false,
+        max_tokens: Math.min(options?.maxTokens ?? model.maxTokens, model.maxTokens),
+      };
+      if (options?.temperature !== undefined) body.temperature = options.temperature;
+      if (context.tools?.length) {
+        body.tools = context.tools.map((tool) => ({
+          type: "function",
+          function: {
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.parameters,
+          },
+        }));
+      }
+      if (options?.toolChoice) body.tool_choice = options.toolChoice;
+      if (options?.reasoning && model.reasoning && compat.supportsReasoningEffort) {
+        const effort = model.thinkingLevelMap?.[options.reasoning] ?? options.reasoning;
+        if (typeof effort === "string") body.reasoning_effort = effort;
+      }
+      if (model.samplingParams) Object.assign(body, model.samplingParams);
+      if (options?.samplingParams) Object.assign(body, options.samplingParams);
+      const nextBody = await options?.onPayload?.(body, model);
+      const payload = (nextBody && typeof nextBody === "object" ? nextBody : body) as Record<string, unknown>;
+
+      stream.push({ type: "start", partial: output });
+      const fetchImpl = options.fetch ?? fetch;
+      const response = await fetchImpl(`${model.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${options.apiKey}`,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          ...options.headers,
+        },
+        body: JSON.stringify(payload),
+        signal: options.signal,
+      });
+      await options.onResponse?.({
+        status: response.status,
+        headers: Object.fromEntries(response.headers.entries()),
+      }, model);
+      const text = await response.text();
+      if (!response.ok) throw new Error(`Command Code HTTP ${response.status}: ${text.slice(0, 1000)}`);
+      const result = JSON.parse(text) as Record<string, unknown>;
+      const choice = Array.isArray(result.choices) && isRecord(result.choices[0]) ? result.choices[0] : {};
+      const message = isRecord(choice.message) ? choice.message : {};
+
+      const reasoning = reasoningTextFromMessage(message);
+      const reasoningDetails = Array.isArray(message.reasoning_details) ? message.reasoning_details : undefined;
+      if (reasoning) {
+        const block: any = {
+          type: "thinking",
+          thinking: reasoning,
+          ...(reasoningDetails ? { thinkingSignature: JSON.stringify(reasoningDetails) } : {}),
+        };
+        output.content.push(block);
+        const contentIndex = output.content.length - 1;
+        stream.push({ type: "thinking_start", contentIndex, partial: output });
+        stream.push({ type: "thinking_delta", contentIndex, delta: reasoning, partial: output });
+        stream.push({ type: "thinking_end", contentIndex, content: reasoning, partial: output });
+      }
+
+      const content = typeof message.content === "string" ? message.content : "";
+      if (content) {
+        const block = { type: "text" as const, text: content };
+        output.content.push(block);
+        const contentIndex = output.content.length - 1;
+        stream.push({ type: "text_start", contentIndex, partial: output });
+        stream.push({ type: "text_delta", contentIndex, delta: content, partial: output });
+        stream.push({ type: "text_end", contentIndex, content, partial: output });
+      }
+
+      const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+      for (const rawCall of toolCalls) {
+        if (!isRecord(rawCall)) continue;
+        const fn = isRecord(rawCall.function) ? rawCall.function : {};
+        const id = typeof rawCall.id === "string" ? rawCall.id : `call_${Date.now()}`;
+        const name = typeof fn.name === "string" ? fn.name : "";
+        let args: Record<string, unknown> = {};
+        if (typeof fn.arguments === "string") {
+          try { args = JSON.parse(fn.arguments); } catch { /* keep empty object */ }
+        } else if (isRecord(fn.arguments)) {
+          args = fn.arguments;
+        }
+        const toolCall: any = { type: "toolCall", id, name, arguments: args };
+        output.content.push(toolCall);
+        const contentIndex = output.content.length - 1;
+        stream.push({ type: "toolcall_start", contentIndex, partial: output });
+        stream.push({ type: "toolcall_delta", contentIndex, delta: JSON.stringify(args), partial: output });
+        stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
+      }
+
+      output.usage = commandCodeUsage(result.usage);
+      output.stopReason = toolCalls.length > 0
+        ? "toolUse"
+        : choice.finish_reason === "length" ? "length" : "stop";
+      stream.push({ type: "done", reason: output.stopReason, message: output });
+    } catch (error) {
+      output.stopReason = options?.signal?.aborted ? "aborted" : "error";
+      output.errorMessage = error instanceof Error ? error.message : String(error);
+      stream.push({ type: "error", reason: output.stopReason, error: output });
+    } finally {
+      stream.end();
+    }
+  };
+  void run();
+  return stream;
+}
+
 export default function piCommandCode(pi: ExtensionAPI): void {
   // Register synchronously from the last successful cache so Pi can restore
   // commandcode/<model> before any network refresh runs.
@@ -272,6 +462,7 @@ export default function piCommandCode(pi: ExtensionAPI): void {
     apiKey: "$COMMAND_CODE_API_KEY",
     authHeader: true,
     api: "openai-completions",
+    streamSimple: streamCommandCodeBuffered,
     headers: zdrHeaders(),
     models: initialModels,
     refreshModels: async (context) => {
