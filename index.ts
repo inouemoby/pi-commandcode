@@ -6,7 +6,11 @@ import {
   type Model,
   type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
-import { convertMessages } from "@earendil-works/pi-ai/api/openai-completions";
+// NOTE: jiti aliases rewrite every "@earendil-works/pi-ai/<subpath>" import to
+// the compat entrypoint's directory (dist/compat.js/<subpath>), which does not
+// exist. Importing the concrete file relatively bypasses the alias table.
+// @ts-expect-error compiled JS subpath without bundled type declarations
+import { convertMessages } from "./node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js";
 import type { ExtensionAPI, ProviderModelConfig, ProviderConfig } from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -466,11 +470,14 @@ export default function piCommandCode(pi: ExtensionAPI): void {
     headers: zdrHeaders(),
     models: initialModels,
     refreshModels: async (context) => {
-      if (!context.allowNetwork || context.signal.aborted) return [];
+      // Return undefined (not []) when the catalog cannot be refreshed: an
+      // empty array would be published as the new model list and wipe the
+      // synchronously registered cached models during offline startup refresh.
+      if (!context.allowNetwork || context.signal.aborted) return undefined;
       const key = context.credential?.type === "api_key"
         ? context.credential.key?.trim()
         : readApiKeyFromDisk();
-      if (!key) return [];
+      if (!key) return undefined;
       const models = await fetchModels(key, context.signal, REFRESH_TIMEOUT_MS);
       writeCachedModels(models);
       return models;
