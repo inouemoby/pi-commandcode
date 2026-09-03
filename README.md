@@ -8,8 +8,7 @@ Command Code API documentation: <https://commandcode.ai/docs/provider>
 
 - Registers the `commandcode` provider with **zero static models**, mirroring `pi-ollama-cloud`.
 - Pi's native `/login` flow is used: choose **Sign in with an API key**, select **Command Code**, then enter the key in the standard login dialog.
-- After authentication, Pi automatically refreshes the dynamic model catalog. Use `/commandcode-refresh` if a manual refresh is needed.
-- `/commandcode-status` shows authentication state and the current model count without exposing the key.
+- After authentication, Pi automatically refreshes the dynamic model catalog.
 - Claude model IDs use the documented Anthropic `/messages` endpoint; other models use OpenAI `/chat/completions`.
 - Model names, context windows, max output limits, reasoning hints, and image-input flags are derived from the live `/models` response. Prices remain zero when Command Code does not publish pricing in that response; this is not a billing claim.
 - `COMMAND_CODE_API_KEY` and the legacy `COMMANDCODE_API_KEY` environment variable are supported.

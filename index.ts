@@ -174,37 +174,4 @@ export default function piCommandCode(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerCommand("commandcode-refresh", {
-    description: "Refresh the Command Code model catalog from /provider/v1/models",
-    handler: async (_args, ctx) => {
-      const result = await ctx.modelRegistry.refresh({
-        providers: [PROVIDER_ID],
-        force: true,
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
-      const error = result.errors.get(PROVIDER_ID);
-      if (error) {
-        ctx.ui.notify(`Command Code refresh failed: ${error.message}`, "error");
-        return;
-      }
-      const modelCount = ctx.modelRegistry.getAll().filter((model) => model.provider === PROVIDER_ID).length;
-      ctx.ui.notify(`Command Code model catalog refreshed: ${modelCount} models.`, "info");
-    },
-  });
-
-  pi.registerCommand("commandcode-status", {
-    description: "Show Command Code authentication and dynamic model status",
-    handler: async (_args, ctx) => {
-      const auth = ctx.modelRegistry.getProviderAuthStatus(PROVIDER_ID);
-      const models = ctx.modelRegistry.getAll().filter((model) => model.provider === PROVIDER_ID);
-      ctx.ui.notify([
-        `provider: ${DISPLAY_NAME}`,
-        `authenticated: ${auth ? "yes" : "no"}`,
-        `models: ${models.length}`,
-        `endpoint: ${process.env.COMMANDCODE_MODELS_URL?.trim() || DEFAULT_MODELS_URL}`,
-        `env key: ${process.env.COMMAND_CODE_API_KEY || process.env.COMMANDCODE_API_KEY ? "present" : "absent"}`,
-        `ZDR header: ${zdrHeaders() ? "enabled" : "disabled"}`,
-      ].join("\n"), auth ? "info" : "warning");
-    },
-  });
 }

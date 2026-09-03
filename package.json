@@ -1,10 +1,18 @@
 {
   "name": "pi-commandcode",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Dynamic Command Code provider for Pi with API-key login and live model discovery.",
   "type": "module",
   "license": "MIT",
-  "keywords": ["pi-package", "pi", "commandcode", "provider", "openai", "anthropic", "dynamic-models"],
+  "keywords": [
+    "pi-package",
+    "pi",
+    "commandcode",
+    "provider",
+    "openai",
+    "anthropic",
+    "dynamic-models"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/inouemoby/pi-commandcode.git"
@@ -14,7 +22,9 @@
   },
   "homepage": "https://github.com/inouemoby/pi-commandcode",
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": [
+      "./index.ts"
+    ]
   },
   "scripts": {
     "check": "tsc --noEmit"
